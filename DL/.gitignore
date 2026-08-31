@@ -1,0 +1,28 @@
+# Python and notebook caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Downloaded data, models, and experiment artifacts
+data/
+datasets/
+checkpoints/
+models/
+*.pt
+*.pth
+*.ckpt
+runs/
+wandb/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
