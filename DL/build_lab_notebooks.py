@@ -1,4 +1,4 @@
-"""Generate the four self-contained deep-learning lab notebooks.
+"""Generate the five self-contained deep-learning lab notebooks.
 
 Run with: conda run -n dl python build_lab_notebooks.py
 """
@@ -914,9 +914,262 @@ The plotted losses, BLEU score, and example translations are computed by this ru
     save("Experiment_4_Transformer_Translation.ipynb", cells)
 
 
+def experiment_5():
+    cells = [
+        md(r'''
+# Experiment 5 — Vanilla GAN for Fashion Image Generation
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Kabilash01/Semester-7-/blob/main/DL/notebooks/Experiment_5_Vanilla_GAN.ipynb)
+
+This notebook is designed to run on **Google Colab** (a free T4 GPU trains it in a few minutes; it also runs on CPU). Use *Runtime → Run all* after opening it from the badge above, or select a GPU runtime first via *Runtime → Change runtime type*.
+
+## Aim
+To implement the original (Goodfellow et al., 2014) **vanilla Generative Adversarial Network** — fully connected generator and discriminator trained with the minimax adversarial objective — and use it to synthesize Fashion-MNIST clothing images from random noise.
+
+## Objectives
+
+1. Implement a fully connected (MLP) generator and discriminator from first principles, with no convolutional layers.
+2. Train both networks jointly with the adversarial binary cross-entropy objective and one-sided label smoothing for stability.
+3. Track generator loss, discriminator loss, and discriminator accuracy on real versus generated images across epochs.
+4. Visualize the training progression, the final generated image grid, and a latent-space interpolation to confirm the generator learned a continuous, meaningful mapping rather than memorizing training images.
+'''),
+        md(r'''
+## Dataset
+
+```text
+Dataset: Fashion-MNIST
+Dataset source: torchvision.datasets.FashionMNIST (Zalando Research)
+Task: Unconditional image generation (unsupervised — labels are not used for training)
+Number of samples: 70,000 grayscale 28x28 images across 10 clothing categories
+Training samples: CONFIG["train_samples"] selected from the official 60,000-image training split
+Input format: 28x28 grayscale image, pixel values scaled to [-1, 1]
+Output format: 28x28 grayscale image synthesized from a random noise vector
+```
+
+Fashion-MNIST is a deliberately different dataset from the handwritten-digit MNIST commonly used to demonstrate vanilla GANs: it has more intra-class visual variety (t-shirts, trousers, bags, shoes, coats), which makes the generator's task, and mode-collapse failure modes, more visible in the qualitative results. Labels are downloaded but only used to caption a few real examples during exploration — the GAN itself is unconditional.
+'''),
+        md("## 1–4. Required libraries and reproducible configuration"),
+        code(r'''
+!pip -q install torch torchvision --upgrade
+'''),
+        code(r'''
+import math, os, random, time
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from torchvision.utils import make_grid
+
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", DEVICE)
+
+CONFIG = {
+    "train_samples": 20000,
+    "batch_size": 128,
+    "learning_rate": 2e-4,
+    "epochs": 30,
+    "latent_dim": 100,
+    "hidden_dim": 256,
+    "sample_grid_size": 25,
+}
+CONFIG
+'''),
+        md("## 5–6. Dataset loading and exploration"),
+        code(r'''
+CLASS_NAMES = ["T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
+               "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"]
+
+transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+full_train = datasets.FashionMNIST(root="data", train=True, download=True, transform=transform)
+
+generator_split = torch.Generator().manual_seed(SEED)
+indices = torch.randperm(len(full_train), generator=generator_split)[:CONFIG["train_samples"]]
+train_dataset = torch.utils.data.Subset(full_train, indices.tolist())
+train_loader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True,
+                          generator=torch.Generator().manual_seed(SEED), drop_last=True)
+print(f"Training images used: {len(train_dataset):,} of {len(full_train):,} available")
+
+fig, axes = plt.subplots(2, 5, figsize=(10, 4.5))
+for ax, index in zip(axes.flat, indices[:10]):
+    image, label = full_train[index]
+    ax.imshow(image.squeeze(0) * 0.5 + 0.5, cmap="gray"); ax.axis("off")
+    ax.set_title(CLASS_NAMES[label], fontsize=9)
+plt.suptitle("Fashion-MNIST training examples"); plt.tight_layout(); plt.show()
+'''),
+        md(r'''
+## 7–8. Generator and discriminator (fully connected, vanilla GAN)
+
+The generator maps a 100-dimensional noise vector $z \sim \mathcal{N}(0, I)$ through three linear layers (with batch normalization and LeakyReLU) to a 784-dimensional output, reshaped to a $28\times28$ image and squashed to $[-1, 1]$ with `Tanh`. The discriminator is a mirrored fully connected binary classifier with dropout, scoring an image as real or generated with a single logit (no convolutions in either network — this is the original 2014 Goodfellow et al. architecture, not DCGAN).
+'''),
+        code(r'''
+class Generator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        d = CONFIG["hidden_dim"]
+        self.net = nn.Sequential(
+            nn.Linear(CONFIG["latent_dim"], d), nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(d, d * 2), nn.BatchNorm1d(d * 2), nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(d * 2, d * 4), nn.BatchNorm1d(d * 4), nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(d * 4, 28 * 28), nn.Tanh(),
+        )
+    def forward(self, z):
+        return self.net(z).view(-1, 1, 28, 28)
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        d = CONFIG["hidden_dim"]
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(28 * 28, d * 4), nn.LeakyReLU(0.2, inplace=True), nn.Dropout(0.3),
+            nn.Linear(d * 4, d * 2), nn.LeakyReLU(0.2, inplace=True), nn.Dropout(0.3),
+            nn.Linear(d * 2, d), nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(d, 1),
+        )
+    def forward(self, x):
+        return self.net(x)
+
+generator = Generator().to(DEVICE)
+discriminator = Discriminator().to(DEVICE)
+print(generator)
+print(discriminator)
+print(f"Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
+print(f"Discriminator parameters: {sum(p.numel() for p in discriminator.parameters()):,}")
+'''),
+        md(r'''
+## 9. Adversarial training loop
+
+Each batch alternates a discriminator step (maximize $\log D(x) + \log(1 - D(G(z)))$, implemented as binary cross-entropy on real and detached fake images) and a generator step (maximize $\log D(G(z))$ via the non-saturating trick: minimize BCE against label 1 for the discriminator's judgment of fresh fake images). One-sided label smoothing (real target 0.9 instead of 1.0) and Adam with $\beta_1=0.5$ are the standard vanilla-GAN stabilization tricks used here. A fixed noise batch is reused every epoch to visualize the generator's progression on the same latent points.
+'''),
+        code(r'''
+criterion = nn.BCEWithLogitsLoss()
+g_optimizer = torch.optim.Adam(generator.parameters(), lr=CONFIG["learning_rate"], betas=(0.5, 0.999))
+d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=CONFIG["learning_rate"], betas=(0.5, 0.999))
+
+fixed_noise = torch.randn(CONFIG["sample_grid_size"], CONFIG["latent_dim"], device=DEVICE)
+history = {"generator_loss": [], "discriminator_loss": [], "d_real_accuracy": [], "d_fake_accuracy": []}
+snapshots = {}
+
+for epoch in range(1, CONFIG["epochs"] + 1):
+    started = time.time()
+    g_running, d_running, real_correct, fake_correct, seen = 0.0, 0.0, 0, 0, 0
+    for real_images, _ in train_loader:
+        real_images = real_images.to(DEVICE)
+        batch_size = real_images.size(0)
+        real_targets = torch.full((batch_size, 1), 0.9, device=DEVICE)
+        fake_targets = torch.zeros(batch_size, 1, device=DEVICE)
+
+        d_optimizer.zero_grad()
+        real_logits = discriminator(real_images)
+        noise = torch.randn(batch_size, CONFIG["latent_dim"], device=DEVICE)
+        fake_images = generator(noise)
+        fake_logits = discriminator(fake_images.detach())
+        d_loss = criterion(real_logits, real_targets) + criterion(fake_logits, fake_targets)
+        d_loss.backward(); d_optimizer.step()
+
+        g_optimizer.zero_grad()
+        regenerated_logits = discriminator(fake_images)
+        g_loss = criterion(regenerated_logits, torch.ones(batch_size, 1, device=DEVICE))
+        g_loss.backward(); g_optimizer.step()
+
+        g_running += g_loss.item() * batch_size; d_running += d_loss.item() * batch_size
+        real_correct += (real_logits.detach() > 0).sum().item()
+        fake_correct += (fake_logits.detach() < 0).sum().item()
+        seen += batch_size
+
+    history["generator_loss"].append(g_running / seen)
+    history["discriminator_loss"].append(d_running / seen)
+    history["d_real_accuracy"].append(real_correct / seen)
+    history["d_fake_accuracy"].append(fake_correct / seen)
+
+    if epoch == 1 or epoch % max(1, CONFIG["epochs"] // 5) == 0 or epoch == CONFIG["epochs"]:
+        generator.eval()
+        with torch.no_grad():
+            snapshots[epoch] = generator(fixed_noise).cpu()
+        generator.train()
+
+    print(f"Epoch {epoch:02d} | G loss {history['generator_loss'][-1]:.4f} "
+          f"| D loss {history['discriminator_loss'][-1]:.4f} "
+          f"| D(real) acc {history['d_real_accuracy'][-1]:.3f} "
+          f"| D(fake) acc {history['d_fake_accuracy'][-1]:.3f} | {time.time()-started:.1f}s")
+'''),
+        md("## 10. Adversarial loss and discriminator-accuracy curves"),
+        code(r'''
+fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+axes[0].plot(range(1, CONFIG["epochs"]+1), history["generator_loss"], marker="o", label="generator")
+axes[0].plot(range(1, CONFIG["epochs"]+1), history["discriminator_loss"], marker="o", label="discriminator")
+axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("BCE loss"); axes[0].set_title("Adversarial losses")
+axes[0].grid(alpha=.3); axes[0].legend()
+
+axes[1].plot(range(1, CONFIG["epochs"]+1), history["d_real_accuracy"], marker="o", label="D on real")
+axes[1].plot(range(1, CONFIG["epochs"]+1), history["d_fake_accuracy"], marker="o", label="D on fake")
+axes[1].axhline(0.5, color="gray", linestyle="--", linewidth=1, label="chance level")
+axes[1].set_xlabel("Epoch"); axes[1].set_ylabel("Discriminator accuracy"); axes[1].set_title("Discriminator accuracy by source")
+axes[1].grid(alpha=.3); axes[1].legend()
+plt.tight_layout(); plt.show()
+'''),
+        md("## 11. Training progression (same fixed noise every checkpoint)"),
+        code(r'''
+epochs_shown = sorted(snapshots)
+fig, axes = plt.subplots(1, len(epochs_shown), figsize=(3.2 * len(epochs_shown), 3.6))
+for ax, epoch in zip(axes, epochs_shown):
+    grid = make_grid(snapshots[epoch][:9] * 0.5 + 0.5, nrow=3, padding=1)
+    ax.imshow(grid.permute(1, 2, 0).squeeze(-1), cmap="gray"); ax.axis("off")
+    ax.set_title(f"Epoch {epoch}")
+plt.suptitle("Generator output on fixed noise across training"); plt.tight_layout(); plt.show()
+'''),
+        md("## 12–13. Final generated grid and latent-space interpolation"),
+        code(r'''
+generator.eval()
+with torch.no_grad():
+    final_samples = generator(fixed_noise).cpu()
+grid = make_grid(final_samples * 0.5 + 0.5, nrow=5, padding=2)
+plt.figure(figsize=(6, 6))
+plt.imshow(grid.permute(1, 2, 0).squeeze(-1), cmap="gray"); plt.axis("off")
+plt.title(f"{CONFIG['sample_grid_size']} generated Fashion-MNIST images (epoch {CONFIG['epochs']})")
+plt.show()
+'''),
+        code(r'''
+with torch.no_grad():
+    start_z = torch.randn(1, CONFIG["latent_dim"], device=DEVICE)
+    end_z = torch.randn(1, CONFIG["latent_dim"], device=DEVICE)
+    steps = 10
+    weights = torch.linspace(0, 1, steps, device=DEVICE).unsqueeze(1)
+    interpolated_z = (1 - weights) * start_z + weights * end_z
+    interpolated_images = generator(interpolated_z).cpu()
+
+fig, axes = plt.subplots(1, steps, figsize=(steps * 1.4, 1.8))
+for ax, image in zip(axes, interpolated_images):
+    ax.imshow(image.squeeze(0) * 0.5 + 0.5, cmap="gray"); ax.axis("off")
+plt.suptitle("Latent-space interpolation between two random noise vectors"); plt.tight_layout(); plt.show()
+'''),
+        md(r'''
+## 14. Results and conclusion
+
+The loss curves, discriminator accuracies, training-progression grid, final sample grid, and latent-space interpolation above are produced by this executed run. In a healthy vanilla-GAN run, discriminator accuracy on both real and fake images settles near 0.5–0.7 rather than 1.0, indicating the generator has become hard for the discriminator to distinguish from real Fashion-MNIST images; the interpolation grid should morph smoothly between garment silhouettes if the generator has learned a continuous manifold instead of memorizing or collapsing onto a handful of modes.
+
+This fully connected architecture is intentionally the original, simplest GAN formulation — no convolutions, no Wasserstein loss, no progressive growing — so that adversarial training dynamics (the minimax game, non-saturating generator loss, one-sided label smoothing) are visible without architectural complexity. Common vanilla-GAN failure modes to watch for are mode collapse (all generated images look nearly identical) and discriminator overpowering the generator (D(real) and D(fake) accuracy both near 1.0 while generator loss keeps climbing); a convolutional DCGAN, spectral normalization, or a Wasserstein objective with gradient penalty are the standard next steps to improve stability and sample sharpness.
+'''),
+    ]
+    save("Experiment_5_Vanilla_GAN.ipynb", cells)
+
+
 if __name__ == "__main__":
     experiment_1()
     experiment_2()
     experiment_3()
     experiment_4()
-    print(f"Created four notebooks in {OUT}")
+    experiment_5()
+    print(f"Created five notebooks in {OUT}")

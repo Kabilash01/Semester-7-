@@ -1,6 +1,6 @@
 # Deep Learning Lab Experiments
 
-This repository contains four self-contained, executable laboratory notebooks covering recurrent models, learned attention, Vision Transformers, and encoder–decoder Transformers. Each notebook downloads a public dataset programmatically, exposes a compact `CONFIG` block, trains a model, evaluates it, plots learning curves, and shows qualitative predictions.
+This repository contains five self-contained, executable laboratory notebooks covering recurrent models, learned attention, Vision Transformers, encoder–decoder Transformers, and generative adversarial networks. Each notebook downloads a public dataset programmatically, exposes a compact `CONFIG` block, trains a model, evaluates it, plots learning curves, and shows qualitative predictions.
 
 | Experiment | Topic | Model | Dataset | Notebook |
 | --- | --- | --- | --- | --- |
@@ -8,6 +8,9 @@ This repository contains four self-contained, executable laboratory notebooks co
 | 2 | Language Translation | GRU encoder–decoder + Bahdanau attention | OPUS Books English–French | [Experiment 2](notebooks/Experiment_2_RNN_Attention_Translation.ipynb) |
 | 3 | Image Captioning | Pretrained ViT-B/16 + Transformer decoder | Flickr8k subset | [Experiment 3](notebooks/Experiment_3_ViT_Image_Captioning.ipynb) |
 | 4 | Language Translation | Encoder–decoder Transformer | OPUS Books English–French | [Experiment 4](notebooks/Experiment_4_Transformer_Translation.ipynb) |
+| 5 | Image Generation | Vanilla (fully connected) GAN | Fashion-MNIST | [Experiment 5](notebooks/Experiment_5_Vanilla_GAN.ipynb) |
+
+Experiment 5 is designed to be run on **Google Colab** (open it via the badge at the top of the notebook, or `Runtime → Run all`); it also runs locally on CPU. Unlike Experiments 1–4, its checked-in copy is unexecuted — run it once in Colab to populate the loss curves, generated-image grids, and interpolation results.
 
 ## Requirements and installation
 
@@ -48,6 +51,7 @@ Repeat with the other notebook paths. The checked-in notebooks retain outputs fr
 - **IMDb (`stanfordnlp/imdb`)** contains 25,000 labelled training reviews and 25,000 labelled test reviews. Experiment 1 creates a deterministic validation subset from the official training data.
 - **OPUS Books (`Helsinki-NLP/opus_books`, `en-fr`)** contains 127,085 aligned English–French sentence pairs. Experiments 2 and 4 deterministically shuffle and form disjoint train, validation, and test subsets.
 - **Flickr8k (`intro/flickr8k`)** contains 8,000 images with five English captions per image and official 6,000/1,000/1,000 train/dev/test splits. Experiment 3 streams only the configured subset to keep storage and runtime manageable.
+- **Fashion-MNIST (`torchvision.datasets.FashionMNIST`)** contains 70,000 grayscale 28×28 clothing images across 10 categories. Experiment 5 trains unconditionally (no labels used for training) on a deterministic subset of the 60,000-image training split.
 
 No dataset requires authentication. Sample counts actually used are printed in each notebook.
 
@@ -57,6 +61,7 @@ No dataset requires authentication. Sample counts actually used are printed in e
 - **Experiment 2:** a GRU encoder produces source states. A GRU decoder uses explicit Bahdanau attention at every step and mixes teacher forcing with its own previous predictions.
 - **Experiment 3:** a frozen pretrained ViT-B/16 converts 16×16 image patches into a class-token visual representation. A trainable causal Transformer decoder cross-attends to the projected visual feature and generates captions autoregressively.
 - **Experiment 4:** learned token embeddings plus sinusoidal positions enter a PyTorch encoder–decoder Transformer with multi-head attention, causal masking, cross-attention, feed-forward sublayers, residual paths, and layer normalization.
+- **Experiment 5:** a fully connected generator maps 100-dimensional Gaussian noise through three linear/batch-norm/LeakyReLU blocks to a 28×28 `Tanh`-squashed image; a mirrored fully connected discriminator scores real versus generated images. Both are trained jointly with the adversarial BCE objective, one-sided label smoothing, and Adam (`β1=0.5`) — the original 2014 Goodfellow et al. formulation, with no convolutions.
 
 ## Results summary
 
@@ -79,4 +84,4 @@ A CUDA-capable GPU is recommended, particularly for initial ViT feature extracti
 
 ## Repository notes
 
-`build_lab_notebooks.py` is the reproducible source used to generate the four notebooks. Re-running it replaces the generated notebook JSON with clean, unexecuted notebooks; execute them again afterward if stored outputs are desired.
+`build_lab_notebooks.py` is the reproducible source used to generate all five notebooks. Re-running it replaces the generated notebook JSON with clean, unexecuted notebooks; execute them again afterward if stored outputs are desired.
